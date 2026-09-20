@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WebView.setWebContentsDebuggingEnabled(true)
         webView = WebView(this)
         setContentView(webView)
 
@@ -128,6 +129,30 @@ class MainActivity : Activity() {
                 window._fsPolyfilled = true;
                 window._fsPromises = {};
 
+                // === DEBUG OVERLAY ===
+                const debugPanel = document.createElement('div');
+                debugPanel.id = '_dbgPanel';
+                debugPanel.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow-y:auto;background:rgba(0,0,0,0.92);color:#0f0;font:11px/1.4 monospace;padding:8px;z-index:999999;display:none;';
+                document.body.appendChild(debugPanel);
+                const toggleBtn = document.createElement('div');
+                toggleBtn.textContent = 'DBG';
+                toggleBtn.style.cssText = 'position:fixed;top:4px;right:4px;background:#f00;color:#fff;padding:4px 8px;border-radius:4px;z-index:999999;font:bold 11px sans-serif;cursor:pointer;';
+                toggleBtn.onclick = () => { debugPanel.style.display = debugPanel.style.display === 'none' ? 'block' : 'none'; };
+                document.body.appendChild(toggleBtn);
+
+                function dbg(msg) {
+                    const line = document.createElement('div');
+                    line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+                    debugPanel.appendChild(line);
+                    debugPanel.scrollTop = debugPanel.scrollHeight;
+                    console.log('[FSPolyfill]', msg);
+                }
+
+                window.onerror = (m,s,l,c,e) => { dbg('ERR: '+m+' at '+s+':'+l); };
+                window.addEventListener('unhandledrejection', e => { dbg('REJECT: '+(e.reason?.message||e.reason||e)); });
+
+                dbg('Polyfill loaded');
+
                 const SAF_PREFIX = "$SAF_URL_PREFIX";
 
                 class PolyfillFile {
@@ -153,9 +178,9 @@ class MainActivity : Activity() {
                         this.uri = uri;
                         this.isPolyfill = true;
                     }
-                    async verifyPermission(options) { return 'granted'; }
-                    async requestPermission(options) { return 'granted'; }
-                    async queryPermission(options) { return 'granted'; }
+                    async verifyPermission(options) { dbg('verifyPermission called on '+this.name); return 'granted'; }
+                    async requestPermission(options) { dbg('requestPermission called on '+this.name); return 'granted'; }
+                    async queryPermission(options) { dbg('queryPermission called on '+this.name+' mode='+(options&&options.mode)); return 'granted'; }
                 }
 
                 class FileSystemWritableFileStream {
@@ -260,16 +285,24 @@ class MainActivity : Activity() {
 
                 // === showDirectoryPicker polyfill (classes are defined above) ===
                 window.showDirectoryPicker = function(options) {
+                    dbg('showDirectoryPicker called');
                     return new Promise((resolve, reject) => {
                         const id = Math.random().toString(36).substring(7);
                         window._fsPromises[id] = {
                             resolve: (uri) => {
+                                dbg('SAF returned URI: ' + uri);
                                 const name = decodeURIComponent(uri).split('/').pop() || 'root';
-                                resolve(new FileSystemDirectoryHandle(name, uri));
+                                const handle = new FileSystemDirectoryHandle(name, uri);
+                                dbg('Created handle: kind=' + handle.kind + ' name=' + handle.name + ' hasQueryPerm=' + (typeof handle.queryPermission));
+                                resolve(handle);
                             },
-                            reject
+                            reject: (err) => {
+                                dbg('SAF rejected: ' + (err.message || err));
+                                reject(err);
+                            }
                         };
                         AndroidFS.requestDirectoryPicker(id);
+                        dbg('requestDirectoryPicker sent id=' + id);
                     });
                 };
 
@@ -279,6 +312,28 @@ class MainActivity : Activity() {
                     if (obj && obj.isPolyfill) return obj.url;
                     return origCreateObjUrl.call(window.URL, obj);
                 };
+
+                // === Intercept FunLearn's requestPermission to debug ===
+                const _origInterval = window.setInterval;
+                window.setInterval = function(fn, ms, ...args) {
+                    return _origInterval.call(window, fn, ms, ...args);
+                };
+                
+                // Patch after page loads to intercept FunLearn's own requestPermission
+                setTimeout(() => {
+                    if (typeof window.requestPermission === 'function') {
+                        const origRP = window.requestPermission;
+                        window.requestPermission = async function(handle) {
+                            dbg('FunLearn requestPermission called, handle=' + JSON.stringify({kind:handle?.kind,name:handle?.name,hasQueryPerm:typeof handle?.queryPermission,isPolyfill:handle?.isPolyfill}));
+                            const result = await origRP(handle);
+                            dbg('FunLearn requestPermission result=' + result);
+                            return result;
+                        };
+                        dbg('Patched FunLearn requestPermission');
+                    } else {
+                        dbg('FunLearn requestPermission not found yet');
+                    }
+                }, 2000);
             })();
         """.trimIndent()
         webView.evaluateJavascript(js, null)
@@ -293,16 +348,20 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        Log.d("FunLearn", "onActivityResult req=$requestCode result=$resultCode data=${data?.data}")
         if (requestCode == 1001 && resultCode == RESULT_OK) {
             data?.data?.let { uri ->
+                Log.d("FunLearn", "SAF URI: $uri flags=${data.flags}")
                 try {
                     val takeFlags: Int = (data.flags) and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                     contentResolver.takePersistableUriPermission(uri, takeFlags)
+                    Log.d("FunLearn", "takePersistableUriPermission OK")
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Log.e("FunLearn", "takePersistableUriPermission FAILED", e)
                 }
                 
                 val pId = pendingPromiseId
+                Log.d("FunLearn", "Resolving promise $pId with URI $uri")
                 if (pId != null) {
                     runOnUiThread {
                         evaluateJs("window._fsPromises['${pId}'].resolve('${uri}')")
