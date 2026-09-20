@@ -128,13 +128,7 @@ class MainActivity : Activity() {
                 window._fsPolyfilled = true;
                 window._fsPromises = {};
 
-                window.showDirectoryPicker = function(options) {
-                    return new Promise((resolve, reject) => {
-                        const id = Math.random().toString(36).substring(7);
-                        window._fsPromises[id] = { resolve, reject };
-                        AndroidFS.requestDirectoryPicker(id);
-                    });
-                };
+                const SAF_PREFIX = "$SAF_URL_PREFIX";
 
                 class PolyfillFile {
                     constructor(name, uri, size, lastModified) {
@@ -143,27 +137,13 @@ class MainActivity : Activity() {
                         this.size = size;
                         this.lastModified = lastModified;
                         this.type = name.endsWith('.json') ? 'application/json' : (name.endsWith('.ts') ? 'video/mp2t' : 'application/octet-stream');
-                        this.url = "$SAF_URL_PREFIX" + encodeURIComponent(uri);
+                        this.url = SAF_PREFIX + encodeURIComponent(uri);
                         this.isPolyfill = true;
                     }
-
-                    async arrayBuffer() {
-                        const r = await fetch(this.url);
-                        return await r.arrayBuffer();
-                    }
-
-                    async text() {
-                        const r = await fetch(this.url);
-                        return await r.text();
-                    }
-                    
-                    stream() {
-                        throw new Error('stream() not polyfilled');
-                    }
-                    
-                    slice(start, end, contentType) {
-                        return this; // partial polyfill
-                    }
+                    async arrayBuffer() { return (await fetch(this.url)).arrayBuffer(); }
+                    async text() { return (await fetch(this.url)).text(); }
+                    stream() { throw new Error('stream() not polyfilled'); }
+                    slice(start, end, contentType) { return this; }
                 }
 
                 class FileSystemHandle {
@@ -173,24 +153,55 @@ class MainActivity : Activity() {
                         this.uri = uri;
                         this.isPolyfill = true;
                     }
-                    async verifyPermission(options) {
-                        return 'granted';
+                    async verifyPermission(options) { return 'granted'; }
+                    async requestPermission(options) { return 'granted'; }
+                    async queryPermission(options) { return 'granted'; }
+                }
+
+                class FileSystemWritableFileStream {
+                    constructor(uri) { this.uri = uri; }
+                    async write(data) {
+                        return new Promise((resolve, reject) => {
+                            const id = Math.random().toString(36).substring(7);
+                            window._fsPromises[id] = { resolve, reject };
+                            if (typeof data === 'string') {
+                                AndroidFS.writeToFile(id, this.uri, data);
+                            } else if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
+                                AndroidFS.writeToFile(id, this.uri, new TextDecoder('utf-8').decode(data));
+                            } else if (data && data.type === 'write' && data.data) {
+                                let d = data.data;
+                                AndroidFS.writeToFile(id, this.uri, typeof d === 'string' ? d : new TextDecoder('utf-8').decode(d));
+                            } else {
+                                resolve();
+                            }
+                        });
                     }
-                    async requestPermission(options) {
-                        return 'granted';
+                    async close() {}
+                }
+
+                class FileSystemFileHandle extends FileSystemHandle {
+                    constructor(name, uri) { super('file', name, uri); }
+                    async getFile() {
+                        return new Promise((resolve, reject) => {
+                            const id = Math.random().toString(36).substring(7);
+                            window._fsPromises[id] = {
+                                resolve: (info) => resolve(new PolyfillFile(this.name, this.uri, info.size, info.lastModified)),
+                                reject
+                            };
+                            AndroidFS.getFileInfo(id, this.uri);
+                        });
                     }
+                    async createWritable(options) { return new FileSystemWritableFileStream(this.uri); }
                 }
 
                 class FileSystemDirectoryHandle extends FileSystemHandle {
-                    constructor(name, uri) {
-                        super('directory', name, uri);
-                    }
+                    constructor(name, uri) { super('directory', name, uri); }
                     async getDirectoryHandle(name, options) {
                         return new Promise((resolve, reject) => {
                             const id = Math.random().toString(36).substring(7);
-                            window._fsPromises[id] = { 
-                                resolve: (uri) => resolve(new FileSystemDirectoryHandle(name, uri)), 
-                                reject 
+                            window._fsPromises[id] = {
+                                resolve: (uri) => resolve(new FileSystemDirectoryHandle(name, uri)),
+                                reject
                             };
                             AndroidFS.getDirectoryHandle(id, this.uri, name, options && options.create ? true : false);
                         });
@@ -198,34 +209,26 @@ class MainActivity : Activity() {
                     async getFileHandle(name, options) {
                         return new Promise((resolve, reject) => {
                             const id = Math.random().toString(36).substring(7);
-                            window._fsPromises[id] = { 
-                                resolve: (uri) => resolve(new FileSystemFileHandle(name, uri)), 
-                                reject 
+                            window._fsPromises[id] = {
+                                resolve: (uri) => resolve(new FileSystemFileHandle(name, uri)),
+                                reject
                             };
                             AndroidFS.getFileHandle(id, this.uri, name, options && options.create ? true : false);
                         });
                     }
-                    
-                    async *values() {
-                        // Iterating is tricky, we might need a custom iterator, returning an empty array for now
-                        // because we don't implement full iteration unless FunLearn needs it.
-                        // Wait, does FunLearn use directory iteration?
-                        // "akses folder dan file video secara langsung" -> they might know the filenames.
-                    }
+                    async *values() {}
                 }
 
+                // === IDB serialize/deserialize for handle persistence ===
                 function serializeHandle(obj) {
                     if (!obj) return obj;
                     if (obj.isPolyfill) return { _isPolyfillData: true, uri: obj.uri, name: obj.name, kind: obj.kind };
                     if (Array.isArray(obj)) return obj.map(serializeHandle);
                     if (typeof obj === 'object' && obj.constructor === Object) {
-                        const newObj = {};
-                        for (let k in obj) newObj[k] = serializeHandle(obj[k]);
-                        return newObj;
+                        const n = {}; for (let k in obj) n[k] = serializeHandle(obj[k]); return n;
                     }
                     return obj;
                 }
-                
                 function deserializeHandle(obj) {
                     if (!obj) return obj;
                     if (obj._isPolyfillData) {
@@ -237,92 +240,43 @@ class MainActivity : Activity() {
                     }
                     return obj;
                 }
-
                 const origPut = IDBObjectStore.prototype.put;
-                IDBObjectStore.prototype.put = function(value, key) {
-                    return origPut.call(this, serializeHandle(value), key);
-                };
-                
+                IDBObjectStore.prototype.put = function(v, k) { return origPut.call(this, serializeHandle(v), k); };
                 const origAdd = IDBObjectStore.prototype.add;
-                IDBObjectStore.prototype.add = function(value, key) {
-                    return origAdd.call(this, serializeHandle(value), key);
-                };
-
-                const interceptReq = (req) => {
+                IDBObjectStore.prototype.add = function(v, k) { return origAdd.call(this, serializeHandle(v), k); };
+                const origGet = IDBObjectStore.prototype.get;
+                IDBObjectStore.prototype.get = function(key) {
+                    const req = origGet.call(this, key);
                     req.addEventListener('success', () => {
                         if (req.result) {
                             try {
                                 const des = deserializeHandle(req.result);
-                                if (des !== req.result) {
-                                    Object.defineProperty(req, 'result', {value: des, writable: false});
-                                }
+                                if (des !== req.result) Object.defineProperty(req, 'result', {value: des, writable: false});
                             } catch(e){}
                         }
                     });
-                };
-
-                const origGet = IDBObjectStore.prototype.get;
-                IDBObjectStore.prototype.get = function(key) {
-                    const req = origGet.call(this, key);
-                    interceptReq(req);
                     return req;
                 };
 
-                class FileSystemWritableFileStream {
-                    constructor(uri) {
-                        this.uri = uri;
-                    }
-                    async write(data) {
-                        return new Promise((resolve, reject) => {
-                            const id = Math.random().toString(36).substring(7);
-                            window._fsPromises[id] = { resolve, reject };
-                            if (typeof data === 'string') {
-                                AndroidFS.writeToFile(id, this.uri, data);
-                            } else if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
-                                // For simplicity, convert small arraybuffers (like JSON) to text
-                                const decoder = new TextDecoder('utf-8');
-                                const text = decoder.decode(data);
-                                AndroidFS.writeToFile(id, this.uri, text);
-                            } else if (data && data.type === 'write' && data.data) {
-                                let d = data.data;
-                                if (typeof d === 'string') {
-                                    AndroidFS.writeToFile(id, this.uri, d);
-                                } else {
-                                    const decoder = new TextDecoder('utf-8');
-                                    AndroidFS.writeToFile(id, this.uri, decoder.decode(d));
-                                }
-                            } else {
-                                resolve();
-                            }
-                        });
-                    }
-                    async close() {}
-                }
+                // === showDirectoryPicker polyfill (classes are defined above) ===
+                window.showDirectoryPicker = function(options) {
+                    return new Promise((resolve, reject) => {
+                        const id = Math.random().toString(36).substring(7);
+                        window._fsPromises[id] = {
+                            resolve: (uri) => {
+                                const name = decodeURIComponent(uri).split('/').pop() || 'root';
+                                resolve(new FileSystemDirectoryHandle(name, uri));
+                            },
+                            reject
+                        };
+                        AndroidFS.requestDirectoryPicker(id);
+                    });
+                };
 
-                class FileSystemFileHandle extends FileSystemHandle {
-                    constructor(name, uri) {
-                        super('file', name, uri);
-                    }
-                    async getFile() {
-                        return new Promise((resolve, reject) => {
-                            const id = Math.random().toString(36).substring(7);
-                            window._fsPromises[id] = { 
-                                resolve: (info) => resolve(new PolyfillFile(this.name, this.uri, info.size, info.lastModified)), 
-                                reject 
-                            };
-                            AndroidFS.getFileInfo(id, this.uri);
-                        });
-                    }
-                    async createWritable(options) {
-                        return new FileSystemWritableFileStream(this.uri);
-                    }
-                }
-
+                // === URL.createObjectURL override for video playback ===
                 const origCreateObjUrl = window.URL.createObjectURL;
                 window.URL.createObjectURL = function(obj) {
-                    if (obj && obj.isPolyfill) {
-                        return obj.url;
-                    }
+                    if (obj && obj.isPolyfill) return obj.url;
                     return origCreateObjUrl.call(window.URL, obj);
                 };
             })();
