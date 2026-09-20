@@ -1,5 +1,3 @@
--keepclassmembers class com.fahril.funlearn.WebAppInterface {
-   public *;
-}
+-keep class com.fahril.funlearn.WebAppInterface { *; }
 -keepattributes *Annotation*
 -keepattributes JavascriptInterface
