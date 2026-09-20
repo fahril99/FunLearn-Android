@@ -241,7 +241,25 @@ class MainActivity : Activity() {
                             AndroidFS.getFileHandle(id, this.uri, name, options && options.create ? true : false);
                         });
                     }
-                    async *values() {}
+                    async *values() {
+                        const entries = await new Promise((resolve, reject) => {
+                            const id = Math.random().toString(36).substring(7);
+                            window._fsPromises[id] = { resolve, reject };
+                            AndroidFS.getDirectoryEntries(id, this.uri);
+                        });
+                        for (const entry of entries) {
+                            if (entry.kind === 'directory') {
+                                yield new FileSystemDirectoryHandle(entry.name, entry.uri);
+                            } else {
+                                yield new FileSystemFileHandle(entry.name, entry.uri);
+                            }
+                        }
+                    }
+                    async *entries() {
+                        for await (const value of this.values()) {
+                            yield [value.name, value];
+                        }
+                    }
                 }
 
                 // === IDB serialize/deserialize for handle persistence ===

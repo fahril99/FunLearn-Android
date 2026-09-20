@@ -102,6 +102,39 @@ class WebAppInterface(private val context: MainActivity) {
     }
 
     @JavascriptInterface
+    fun getDirectoryEntries(promiseId: String, parentUriString: String) {
+        val parentUri = Uri.parse(parentUriString)
+        try {
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(parentUri, DocumentsContract.getDocumentId(parentUri))
+            val entries = org.json.JSONArray()
+            
+            context.contentResolver.query(childrenUri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE), null, null, null)?.use { cursor ->
+                val idIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                
+                while (cursor.moveToNext()) {
+                    val docId = cursor.getString(idIdx)
+                    val name = cursor.getString(nameIdx)
+                    val mimeType = cursor.getString(mimeIdx)
+                    val isDir = mimeType == DocumentsContract.Document.MIME_TYPE_DIR
+                    val uri = DocumentsContract.buildDocumentUriUsingTree(parentUri, docId)
+                    
+                    val obj = org.json.JSONObject()
+                    obj.put("name", name)
+                    obj.put("uri", uri.toString())
+                    obj.put("kind", if (isDir) "directory" else "file")
+                    entries.put(obj)
+                }
+            }
+            val base64 = android.util.Base64.encodeToString(entries.toString().toByteArray(), android.util.Base64.NO_WRAP)
+            context.evaluateJs("window._fsPromises['${promiseId}'].resolve(JSON.parse(atob('$base64')))")
+        } catch (e: Exception) {
+            rejectPromise(promiseId, e.message ?: "Error getting directory entries")
+        }
+    }
+
+    @JavascriptInterface
     fun writeToFile(promiseId: String, uriString: String, content: String) {
         val uri = Uri.parse(uriString)
         try {
