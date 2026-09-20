@@ -173,6 +173,12 @@ class MainActivity : Activity() {
                         this.uri = uri;
                         this.isPolyfill = true;
                     }
+                    async verifyPermission(options) {
+                        return 'granted';
+                    }
+                    async requestPermission(options) {
+                        return 'granted';
+                    }
                 }
 
                 class FileSystemDirectoryHandle extends FileSystemHandle {
@@ -327,6 +333,7 @@ class MainActivity : Activity() {
     fun launchDirectoryPicker(promiseId: String) {
         pendingPromiseId = promiseId
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         startActivityForResult(intent, 1001)
     }
 
@@ -334,13 +341,17 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 1001 && resultCode == RESULT_OK) {
             data?.data?.let { uri ->
-                val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                contentResolver.takePersistableUriPermission(uri, takeFlags)
+                try {
+                    val takeFlags: Int = (data.flags) and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    contentResolver.takePersistableUriPermission(uri, takeFlags)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
                 
                 val pId = pendingPromiseId
                 if (pId != null) {
                     runOnUiThread {
-                        webView.evaluateJavascript("window._fsPromises['${pId}'].resolve('${uri}')", null)
+                        evaluateJs("window._fsPromises['${pId}'].resolve('${uri}')")
                     }
                     pendingPromiseId = null
                 }
